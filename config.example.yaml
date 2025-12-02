@@ -1,0 +1,30 @@
+# DeployDb Agent Configuration
+#
+# Copy this file to config.yaml and update with your settings.
+
+# Control plane WebSocket URL (provided by DeployDb dashboard)
+control_plane_url: "wss://api.deploydb.com/agent/ws"
+
+# Agent token (provided when adding a server in the dashboard)
+token: "ddb_your_token_here"
+
+# PostgreSQL connection settings
+postgres:
+  host: "localhost"
+  port: 5432
+  user: "deploydb_agent"
+  password: ""  # Or use PGPASSWORD environment variable
+  database: "postgres"
+  sslmode: "prefer"  # disable, prefer, require, verify-ca, verify-full
+
+# Metrics collection interval (minimum 10s)
+# metrics_interval: 30s
+
+# Reconnection backoff settings
+# reconnect_backoff:
+#   initial_interval: 1s
+#   max_interval: 5m
+#   multiplier: 2.0
+
+# Log level: debug, info, warn, error
+# log_level: info
