@@ -26,7 +26,7 @@ type BootstrapConfig struct {
 
 // BootstrapResponse is the response from the control plane's bootstrap config endpoint.
 type BootstrapResponse struct {
-	ServerID   string          `json:"server_id"`
+	ServerID   int             `json:"server_id"`
 	ServerName string          `json:"server_name"`
 	Token      string          `json:"token"` // Server token for agent config
 	Config     BootstrapConfig `json:"config"`
@@ -87,7 +87,7 @@ func (b *Bootstrap) Run(ctx context.Context) error {
 
 	// Step 3: Fetch configuration from control plane
 	b.Logger.Info("fetching configuration from control plane")
-	if err := b.reportProgress(ctx, "fetch_config", "running", "Fetching configuration..."); err != nil {
+	if err := b.reportProgress(ctx, "fetch_config", "bootstrapping", "Fetching configuration..."); err != nil {
 		b.Logger.Warn("failed to report progress", "error", err)
 	}
 
@@ -108,7 +108,7 @@ func (b *Bootstrap) Run(ctx context.Context) error {
 
 	// Step 4: Install PostgreSQL
 	b.Logger.Info("installing PostgreSQL")
-	if err := b.reportProgress(ctx, "install_postgres", "running",
+	if err := b.reportProgress(ctx, "install_postgres", "bootstrapping",
 		fmt.Sprintf("Installing PostgreSQL %s...", config.Config.PostgresVersion)); err != nil {
 		b.Logger.Warn("failed to report progress", "error", err)
 	}
@@ -124,7 +124,7 @@ func (b *Bootstrap) Run(ctx context.Context) error {
 
 	// Step 5: Configure PostgreSQL
 	b.Logger.Info("configuring PostgreSQL")
-	if err := b.reportProgress(ctx, "configure_postgres", "running", "Configuring PostgreSQL..."); err != nil {
+	if err := b.reportProgress(ctx, "configure_postgres", "configuring", "Configuring PostgreSQL..."); err != nil {
 		b.Logger.Warn("failed to report progress", "error", err)
 	}
 
@@ -138,7 +138,7 @@ func (b *Bootstrap) Run(ctx context.Context) error {
 
 	// Step 6: Write agent configuration
 	b.Logger.Info("writing agent configuration")
-	if err := b.reportProgress(ctx, "write_config", "running", "Writing agent configuration..."); err != nil {
+	if err := b.reportProgress(ctx, "write_config", "configuring", "Writing agent configuration..."); err != nil {
 		b.Logger.Warn("failed to report progress", "error", err)
 	}
 
@@ -150,7 +150,21 @@ func (b *Bootstrap) Run(ctx context.Context) error {
 		b.Logger.Warn("failed to report progress", "error", err)
 	}
 
-	// Step 7: Report completion
+	// Step 7: Set up and start the agent service
+	b.Logger.Info("setting up agent service")
+	if err := b.reportProgress(ctx, "setup_service", "configuring", "Setting up monitoring service..."); err != nil {
+		b.Logger.Warn("failed to report progress", "error", err)
+	}
+
+	if err := b.setupService(ctx); err != nil {
+		return b.fail(ctx, "setup_service", err)
+	}
+
+	if err := b.reportProgress(ctx, "setup_service", "completed", "Monitoring service started"); err != nil {
+		b.Logger.Warn("failed to report progress", "error", err)
+	}
+
+	// Step 8: Report completion
 	if err := b.reportProgress(ctx, "complete", "completed", "Bootstrap completed successfully"); err != nil {
 		b.Logger.Warn("failed to report completion", "error", err)
 	}
@@ -198,7 +212,7 @@ func (b *Bootstrap) fetchConfig(ctx context.Context) (*BootstrapResponse, error)
 
 // reportProgress sends a progress update to the control plane.
 func (b *Bootstrap) reportProgress(ctx context.Context, step, status, message string) error {
-	url := fmt.Sprintf("%s/api/v1/bootstrap/progress", b.ControlPlaneURL)
+	url := fmt.Sprintf("%s/api/v1/bootstrap/progress?token=%s", b.ControlPlaneURL, b.Token)
 
 	update := ProgressUpdate{
 		Step:    step,
@@ -217,7 +231,6 @@ func (b *Bootstrap) reportProgress(ctx context.Context, step, status, message st
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+b.Token)
 
 	resp, err := b.HTTPClient.Do(req)
 	if err != nil {
@@ -240,13 +253,12 @@ func (b *Bootstrap) fail(ctx context.Context, step string, err error) error {
 	}
 
 	body, _ := json.Marshal(update)
-	url := fmt.Sprintf("%s/api/v1/bootstrap/progress", b.ControlPlaneURL)
+	url := fmt.Sprintf("%s/api/v1/bootstrap/progress?token=%s", b.ControlPlaneURL, b.Token)
 
 	req, reqErr := http.NewRequestWithContext(ctx, "POST", url,
 		io.NopCloser(strings.NewReader(string(body))))
 	if reqErr == nil {
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+b.Token)
 		resp, _ := b.HTTPClient.Do(req)
 		if resp != nil {
 			resp.Body.Close()
@@ -268,6 +280,77 @@ func (b *Bootstrap) configurePostgres(ctx context.Context) error {
 	// Full implementation would modify postgresql.conf
 
 	b.Logger.Info("PostgreSQL configuration applied (using defaults)")
+	return nil
+}
+
+// setupService installs and starts the agent as a system service.
+func (b *Bootstrap) setupService(ctx context.Context) error {
+	// Get the path to the currently running binary
+	execPath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("get executable path: %w", err)
+	}
+
+	// Copy binary to /usr/local/bin if not already there
+	installPath := "/usr/local/bin/deploydb-agent"
+	if execPath != installPath {
+		b.Logger.Info("installing agent binary", "from", execPath, "to", installPath)
+
+		// Read the current binary
+		data, err := os.ReadFile(execPath)
+		if err != nil {
+			return fmt.Errorf("read binary: %w", err)
+		}
+
+		// Write to install path
+		if err := os.WriteFile(installPath, data, 0755); err != nil {
+			return fmt.Errorf("install binary: %w", err)
+		}
+	}
+
+	// Create systemd service file (Linux only for now)
+	if b.OSInfo.OS != "darwin" {
+		serviceFile := "/etc/systemd/system/deploydb-agent.service"
+		serviceContent := `[Unit]
+Description=DeployDB Agent
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/deploydb-agent run --config=/etc/deploydb/config.yaml
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+`
+		if err := os.WriteFile(serviceFile, []byte(serviceContent), 0644); err != nil {
+			return fmt.Errorf("write service file: %w", err)
+		}
+		b.Logger.Info("systemd service file created", "path", serviceFile)
+
+		// Reload systemd, enable and start the service
+		commands := []struct {
+			name string
+			args []string
+		}{
+			{"systemctl", []string{"daemon-reload"}},
+			{"systemctl", []string{"enable", "deploydb-agent"}},
+			{"systemctl", []string{"start", "deploydb-agent"}},
+		}
+
+		for _, cmd := range commands {
+			if err := runCommand(cmd.name, cmd.args...); err != nil {
+				return fmt.Errorf("run %s %v: %w", cmd.name, cmd.args, err)
+			}
+		}
+		b.Logger.Info("agent service enabled and started")
+	} else {
+		// macOS: create launchd plist
+		// TODO: Implement launchd setup for macOS
+		b.Logger.Info("skipping service setup on macOS (manual setup required)")
+	}
+
 	return nil
 }
 

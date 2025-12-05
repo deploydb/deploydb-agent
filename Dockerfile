@@ -2,7 +2,7 @@
 # Dockerfile for deploydb-agent
 
 # Build stage
-FROM golang:1.21-alpine AS builder
+FROM golang:1.24-alpine AS builder
 
 WORKDIR /app
 
@@ -40,4 +40,4 @@ RUN mkdir -p /etc/deploydb && chown -R agent:agent /etc/deploydb
 USER agent
 
 ENTRYPOINT ["/usr/local/bin/deploydb-agent"]
-CMD ["--config=/etc/deploydb/agent.yaml"]
+CMD ["run", "--config=/etc/deploydb/agent.yaml"]
